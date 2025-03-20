@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import os
 import time
 from fastapi import FastAPI
+import uvicorn
 
 app = FastAPI()
 
@@ -58,6 +59,7 @@ def init_db():
         datum TEXT,
         uhrzeit TEXT,
         ort TEXT,
+        mapslink TEXT,
         FOREIGN KEY (stueck_id) REFERENCES stuecke(id)
     );
     ''')
@@ -82,6 +84,10 @@ def scrape_stueck(url):
     
     beschreibung = "\n".join([p.text.strip() for p in soup.find_all("p")])
     
+    # Google Maps Link extrahieren
+    maps_element = soup.find("a", class_="fancybox fancybox.iframe")
+    mapslink = maps_element["href"] if maps_element and maps_element.has_attr("href") else None
+    
     # Medien extrahieren
     bilder = [img["src"] for img in soup.select(".detail-image-box img")]
     audio = [source["src"] for source in soup.select("audio source")]
@@ -94,13 +100,14 @@ def scrape_stueck(url):
         name = span.find("a").text.strip()
         inszenierungsteam.append((position, name))
     
-    # Aufführungen
+    # Aufführungen (Termine)
     auffuehrungen = []
     for li in soup.select(".detail-beschreibung-terminliste li"):
         datum = li.select_one(".span-2").text.strip()
         uhrzeit = li.select_one(".span-2.last").text.strip()
         ort = li.select_one(".span-7").text.strip()
-        auffuehrungen.append((datum, uhrzeit, ort))
+        # mapslink wird jedem Termin hinzugefügt
+        auffuehrungen.append((datum, uhrzeit, ort, mapslink))
     
     return {
         "titel": titel,
@@ -129,8 +136,11 @@ def save_to_db(data):
         typ = "bild" if url.endswith(".jpg") or url.endswith(".png") else "audio" if url.endswith(".mp3") else "video"
         cursor.execute("INSERT INTO medien (stueck_id, typ, url) VALUES (?, ?, ?)", (stueck_id, typ, url))
     
-    for datum, uhrzeit, ort in data["auffuehrungen"]:
-        cursor.execute("INSERT INTO auffuehrungen (stueck_id, datum, uhrzeit, ort) VALUES (?, ?, ?, ?)", (stueck_id, datum, uhrzeit, ort))
+    for datum, uhrzeit, ort, mapslink in data["auffuehrungen"]:
+        cursor.execute(
+            "INSERT INTO auffuehrungen (stueck_id, datum, uhrzeit, ort, mapslink) VALUES (?, ?, ?, ?, ?)",
+            (stueck_id, datum, uhrzeit, ort, mapslink)
+        )
     
     conn.commit()
     conn.close()
@@ -172,8 +182,15 @@ def get_stuecke():
         medien = [{"typ": typ, "url": url} for typ, url in cursor.fetchall()]
         
         # Aufführungen abrufen
-        cursor.execute("SELECT datum, uhrzeit, ort FROM auffuehrungen WHERE stueck_id = ?", (stueck_id,))
-        auffuehrungen = [{"datum": datum, "uhrzeit": uhrzeit, "ort": ort} for datum, uhrzeit, ort in cursor.fetchall()]
+        cursor.execute("SELECT datum, uhrzeit, ort, mapslink FROM auffuehrungen WHERE stueck_id = ?", (stueck_id,))
+        auffuehrungen = []
+        for datum, uhrzeit, ort, mapslink in cursor.fetchall():
+            auffuehrungen.append({
+                "datum": datum,
+                "uhrzeit": uhrzeit,
+                "ort": ort,
+                "mapslink": mapslink
+            })
         
         result.append({
             "id": stueck_id,
@@ -190,7 +207,5 @@ def get_stuecke():
     conn.close()
     return {"stuecke": result}
 
-
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
